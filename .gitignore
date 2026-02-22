@@ -1,0 +1,13 @@
+# PZ Workshop upload artifacts
+workshop_update.vdf
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

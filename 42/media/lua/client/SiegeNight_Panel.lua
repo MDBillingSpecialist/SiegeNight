@@ -378,15 +378,72 @@ function ISSiegeNightPanel:onJoypadDown(button)
 end
 
 -- ==========================================
--- REGISTER TAB (deferred to OnGameStart so ISCharacterInfoWindow exists)
+-- REGISTER TAB
 -- ==========================================
+-- Two-pronged approach:
+-- 1. Hook createChildren so any FUTURE character info windows get our tab.
+-- 2. On OnGameStart, inject the tab into the EXISTING window instance
+--    (because B42 creates the window before OnGameStart, so the hook alone misses it).
+
+local tabInjected = false
+
+local function injectTabIntoExistingWindow()
+    if tabInjected then return end
+    -- Find the existing character info window for player 0
+    local playerNum = 0
+    local infoWindow = getPlayerInfoPanel(playerNum)
+    if not infoWindow then
+        SN.log("WARNING: getPlayerInfoPanel returned nil — will retry")
+        return false
+    end
+    if not infoWindow.panel then
+        SN.log("WARNING: Character info window has no panel — will retry")
+        return false
+    end
+
+    -- Check if our tab already exists
+    local viewName = "SiegeNightView"
+    if infoWindow[viewName] then
+        SN.log("Siege tab already exists on window")
+        tabInjected = true
+        return true
+    end
+
+    -- Create and inject our panel
+    local panel = ISSiegeNightPanel:new(0, 8, infoWindow.width, infoWindow.height - 8, playerNum)
+    panel:initialise()
+    local tabText = getText("UI_SiegeNight") or "Siege"
+    panel.infoText = getText("UI_SiegeNightPanel") or "Siege Night status"
+    infoWindow.panel:addView(tabText, panel)
+    infoWindow[viewName] = panel
+
+    tabInjected = true
+    SN.log("Panel module loaded - Siege tab injected into existing window.")
+    return true
+end
+
 local function registerSiegeTab()
+    -- Hook for future windows
     ensureAddCharacterPageTab()
     if addCharacterPageTab then
         addCharacterPageTab("SiegeNight", ISSiegeNightPanel)
-        SN.log("Panel module loaded - Siege tab registered.")
-    else
-        SN.log("WARNING: Could not register Siege tab (addCharacterPageTab unavailable)")
+        SN.log("Panel createChildren hook registered.")
+    end
+
+    -- Inject into existing window
+    if not injectTabIntoExistingWindow() then
+        -- If it failed (window not ready yet), retry on next few ticks
+        local retryCount = 0
+        local function retryInject()
+            retryCount = retryCount + 1
+            if injectTabIntoExistingWindow() or retryCount > 300 then
+                Events.OnTick.Remove(retryInject)
+                if retryCount > 300 then
+                    SN.log("WARNING: Failed to inject Siege tab after 300 retries")
+                end
+            end
+        end
+        Events.OnTick.Add(retryInject)
     end
 end
 

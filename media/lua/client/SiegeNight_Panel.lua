@@ -3,21 +3,32 @@
     Custom tab added to the character info window (alongside Health, Skills, etc.)
     Shows: current siege status, wave progress, kill tracking, siege history.
 
-    v2.2 - Initial implementation using addCharacterPageTab pattern.
+    v2.3 - Robust tab registration using ISCharacterInfoWindow hook.
+         - Works with or without TchernoLib.
+         - Deferred registration via OnGameStart to ensure UI classes are loaded.
 ]]
 
-require "ISUI/ISPanelJoypad"
+local ok, _ = pcall(require, "ISUI/ISPanelJoypad")
+if not ok then
+    pcall(require, "ISUI/ISPanel")
+end
 
 local SN = require("SiegeNight_Shared")
 
 -- ==========================================
--- ADDTAB HELPER (inline, no TchernoLib dep)
+-- ADDTAB HELPER (inline, deferred)
 -- ==========================================
--- Check if TchernoLib provides addCharacterPageTab already
-local modInfoTCH = getModInfoByID and getModInfoByID("TchernoLib")
-if modInfoTCH and isModActive and isModActive(modInfoTCH) then
-    require "UI/CharacterInfoAddTab"
-elseif not addCharacterPageTab then
+-- We define addCharacterPageTab ourselves if it doesn't exist.
+-- This hooks ISCharacterInfoWindow.createChildren to inject our tab.
+local function ensureAddCharacterPageTab()
+    if addCharacterPageTab then return end
+
+    -- ISCharacterInfoWindow must be loaded by now (OnGameStart guarantees this)
+    if not ISCharacterInfoWindow then
+        SN.log("WARNING: ISCharacterInfoWindow not found — panel tab will not register")
+        return
+    end
+
     function addCharacterPageTab(tabName, pageType)
         local viewName = tabName .. "View"
 
@@ -26,33 +37,41 @@ elseif not addCharacterPageTab then
             orig_createChildren(self)
             self[viewName] = pageType:new(0, 8, self.width, self.height - 8, self.playerNum)
             self[viewName]:initialise()
-            self[viewName].infoText = getText("UI_" .. tabName .. "Panel")
-            self.panel:addView(getText("UI_" .. tabName), self[viewName])
+            local panelText = getText("UI_" .. tabName .. "Panel") or "Siege Night status"
+            self[viewName].infoText = panelText
+            local tabText = getText("UI_" .. tabName) or "Siege"
+            self.panel:addView(tabText, self[viewName])
         end
 
         local orig_onTabTornOff = ISCharacterInfoWindow.onTabTornOff
-        function ISCharacterInfoWindow:onTabTornOff(view, window)
-            if self.playerNum == 0 and view == self[viewName] then
-                ISLayoutManager.RegisterWindow("charinfowindow." .. tabName, ISCollapsableWindow, window)
+        if orig_onTabTornOff then
+            function ISCharacterInfoWindow:onTabTornOff(view, window)
+                if self.playerNum == 0 and view == self[viewName] then
+                    if ISLayoutManager then
+                        ISLayoutManager.RegisterWindow("charinfowindow." .. tabName, ISCollapsableWindow, window)
+                    end
+                end
+                orig_onTabTornOff(self, view, window)
             end
-            orig_onTabTornOff(self, view, window)
         end
 
         local orig_SaveLayout = ISCharacterInfoWindow.SaveLayout
-        function ISCharacterInfoWindow:SaveLayout(name, layout)
-            orig_SaveLayout(self, name, layout)
-            local addTab = false
-            if self[viewName] and self[viewName].parent == self.panel then
-                addTab = true
-                if self[viewName] == self.panel:getActiveView() then
-                    layout.current = tabName
+        if orig_SaveLayout then
+            function ISCharacterInfoWindow:SaveLayout(name, layout)
+                orig_SaveLayout(self, name, layout)
+                local hasTab = false
+                if self[viewName] and self[viewName].parent == self.panel then
+                    hasTab = true
+                    if self[viewName] == self.panel:getActiveView() then
+                        layout.current = tabName
+                    end
                 end
-            end
-            if addTab then
-                if not layout.tabs then
-                    layout.tabs = tabName
-                else
-                    layout.tabs = layout.tabs .. "," .. tabName
+                if hasTab then
+                    if not layout.tabs then
+                        layout.tabs = tabName
+                    else
+                        layout.tabs = layout.tabs .. "," .. tabName
+                    end
                 end
             end
         end
@@ -361,6 +380,71 @@ end
 -- ==========================================
 -- REGISTER TAB
 -- ==========================================
-addCharacterPageTab("SiegeNight", ISSiegeNightPanel)
+-- Two-pronged approach:
+-- 1. Hook createChildren so any FUTURE character info windows get our tab.
+-- 2. On OnGameStart, inject the tab into the EXISTING window instance
+--    (because B42 creates the window before OnGameStart, so the hook alone misses it).
 
-SN.log("Panel module loaded - Siege tab added to character info.")
+local tabInjected = false
+
+local function injectTabIntoExistingWindow()
+    if tabInjected then return end
+    -- Find the existing character info window for player 0
+    local playerNum = 0
+    local infoWindow = getPlayerInfoPanel(playerNum)
+    if not infoWindow then
+        SN.log("WARNING: getPlayerInfoPanel returned nil — will retry")
+        return false
+    end
+    if not infoWindow.panel then
+        SN.log("WARNING: Character info window has no panel — will retry")
+        return false
+    end
+
+    -- Check if our tab already exists
+    local viewName = "SiegeNightView"
+    if infoWindow[viewName] then
+        SN.log("Siege tab already exists on window")
+        tabInjected = true
+        return true
+    end
+
+    -- Create and inject our panel
+    local panel = ISSiegeNightPanel:new(0, 8, infoWindow.width, infoWindow.height - 8, playerNum)
+    panel:initialise()
+    local tabText = getText("UI_SiegeNight") or "Siege"
+    panel.infoText = getText("UI_SiegeNightPanel") or "Siege Night status"
+    infoWindow.panel:addView(tabText, panel)
+    infoWindow[viewName] = panel
+
+    tabInjected = true
+    SN.log("Panel module loaded - Siege tab injected into existing window.")
+    return true
+end
+
+local function registerSiegeTab()
+    -- Hook for future windows
+    ensureAddCharacterPageTab()
+    if addCharacterPageTab then
+        addCharacterPageTab("SiegeNight", ISSiegeNightPanel)
+        SN.log("Panel createChildren hook registered.")
+    end
+
+    -- Inject into existing window
+    if not injectTabIntoExistingWindow() then
+        -- If it failed (window not ready yet), retry on next few ticks
+        local retryCount = 0
+        local function retryInject()
+            retryCount = retryCount + 1
+            if injectTabIntoExistingWindow() or retryCount > 300 then
+                Events.OnTick.Remove(retryInject)
+                if retryCount > 300 then
+                    SN.log("WARNING: Failed to inject Siege tab after 300 retries")
+                end
+            end
+        end
+        Events.OnTick.Add(retryInject)
+    end
+end
+
+Events.OnGameStart.Add(registerSiegeTab)
